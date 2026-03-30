@@ -9,9 +9,7 @@ description = "Higashi: Multiscale and integrative scHi-C analysis"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 license = { text = "MIT" }
-authors = [
-  { name = "Ruochi Zhang", email = "ruochiz@andrew.cmu.edu" },
-]
+
 urls = { Homepage = "https://github.com/ma-compbio/Higashi", Repository = "https://github.com/ma-compbio/Higashi", Documentation = "https://github.com/ma-compbio/Higashi/wiki" }
 dependencies = [
   "cooler==0.10.4",
@@ -26,7 +24,6 @@ dependencies = [
   "seaborn==0.13.2",
   "torch==2.11.0",
   "tqdm==4.67.3",
-  "umap-learn==0.5.11",
 ]
 
 [project.optional-dependencies]
