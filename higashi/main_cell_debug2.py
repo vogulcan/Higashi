@@ -9,7 +9,13 @@ from Impute import impute_process
 import argparse
 import resource
 from scipy.sparse import csr_matrix
-from scipy.sparse.csr import get_csr_submatrix
+try:
+	from scipy.sparse._csr import get_csr_submatrix
+except ImportError:
+	try:
+		from scipy.sparse.csr import get_csr_submatrix
+	except ImportError:
+		from scipy.sparse._sparsetools import get_csr_submatrix
 from sklearn.preprocessing import StandardScaler
 import pickle
 import subprocess
@@ -394,8 +400,7 @@ def generate_negative_cpu(x, x_chrom, forward=True):
 						start = max(start, other_bin - max_bin)
 						end = min(end, other_bin + max_bin)
 						
-						temp[change] = np.random.randint(
-							int(start), int(end), 1) + 1
+						temp[change] = int(rg.integers(int(start), int(end))) + 1
 					else:
 						temp[change] = rg.choice(end - start) + start + 1
 					
@@ -591,7 +596,7 @@ def one_thread_generate_neg(edges_part, edges_chrom, edge_weight, collect_num=1,
 
 		# Force to append an empty list and remove it, such that np.array won't broadcasting shapes
 		to_neighs.append([])
-		to_neighs = np.array(to_neighs)[:-1]
+		to_neighs = np.array(to_neighs, dtype='object')[:-1]
 		to_neighs = np.array(to_neighs, dtype='object').reshape((len(x), 2))
 		size = int(len(x) / collect_num)
 		to_neighs_new = []
@@ -1281,7 +1286,6 @@ if __name__ == '__main__':
 		threshold=1e-3,
 		min_lr=1e-6,
 		threshold_mode="abs",
-		verbose=True,
 	)
 	
 	model_parameters = filter(lambda p: p.requires_grad, higashi_model.parameters())
@@ -1334,7 +1338,6 @@ if __name__ == '__main__':
 			threshold=1e-3,
 			min_lr=1e-6,
 			threshold_mode="abs",
-			verbose=True,
 		)
 
 		print ("First stage training")
@@ -1410,7 +1413,6 @@ if __name__ == '__main__':
 		threshold=1e-3,
 		min_lr=1e-6,
 		threshold_mode="abs",
-		verbose=True,
 	)
 
 	if impute_no_nbr_flag or impute_with_nbr_flag:
@@ -1535,7 +1537,6 @@ if __name__ == '__main__':
 			threshold=1e-3,
 			min_lr=1e-6,
 			threshold_mode="abs",
-			verbose=True,
 		)
 
 
@@ -1593,4 +1594,3 @@ if __name__ == '__main__':
 
 				# When the 1nb imputation is there and nbr_mode=1 (itself is not included during learning), add the predicted values with only 1nb to the neighbor version.
 				linkhdf5("%s_nbr_%d_impute" % (embedding_name, neighbor_num-1), cell_id_all, temp_dir, impute_list, extra_str)
-

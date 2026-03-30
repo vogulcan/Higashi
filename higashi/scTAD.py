@@ -110,7 +110,7 @@ def gen_tad(chrom):
 		
 	
 	sc_score = np.array(sc_score)
-	sc_border_indice = np.array(sc_border_indice)
+	sc_border_indice = np.array(sc_border_indice, dtype='object')
 	bulk = np.array(csr_matrix((bulk1, (xs, ys)), shape=(size, size)).todense())
 	bulk *= mask
 	bulk = sqrt_norm(bulk)
@@ -119,7 +119,7 @@ def gen_tad(chrom):
 	bulk_tad_b = call_tads(bulk_score, windowsize=args.window_tad, res=res)
 	sc_score = np.array(sc_score)
 	
-	return chrom, np.array(sc_score), np.array(sc_border),np.array(sc_border_indice), bulk_score, bulk_tad_b
+	return chrom, np.array(sc_score), np.array(sc_border), np.array(sc_border_indice, dtype='object'), bulk_score, bulk_tad_b
 	
 	
 def calibrate_tad(chrom, sc_score, sc_border, sc_border_indice, bulk_score, bulk_tad_b):

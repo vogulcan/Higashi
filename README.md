@@ -24,15 +24,44 @@ As a computational framework for scHi-C analysis, Higashi has the following feat
 We now have Fast-Higashi on conda.
 `conda install -c ruochiz fasthigashi`
 
-The conda support for Higashi is still an on-going effort. Currently, you can install it by:
+This repository is now configured for `uv`. From a clean checkout:
 
 ```{bash}
 git clone https://github.com/ma-compbio/Higashi/
 cd Higashi
-python setup.py install
+uv sync --python 3.12
 ```
 
-It is recommended to have pytorch installed (with CUDA support when applicable) after installing higashi / fast-higashi.
+The default `uv` environment is pinned to the currently working `fasthigashi` micromamba stack that has been verified with this repository:
+
+- Python 3.12
+- numpy 2.4.3
+- scipy 1.16.3
+- pandas 2.3.3
+- scikit-learn 1.8.0
+- torch 2.11.0 (verified in `fasthigashi` as the `2.11.0+cu126` wheel)
+- cooler 0.10.4
+- h5py 3.16.0
+- matplotlib 3.10.8
+- seaborn 0.13.2
+- umap-learn 0.5.11
+
+Optional extras:
+
+```{bash}
+uv sync --extra gpu
+uv sync --extra vis
+```
+
+- `gpu` adds the verified CuPy wheel (`cupy-cuda13x==14.0.1`)
+- `vis` adds the optional `Higashi_vis` stack (`bokeh`, `cachetools`, `cmocean`)
+
+Most legacy entry scripts still assume they are launched from the repository root. For example:
+
+```{bash}
+uv run python higashi/Process.py -c ./config.JSON
+uv run python higashi/main_cell.py -c ../config_dir/config_ramani.JSON
+```
 
 # Documentation
 Please see [the wiki](https://github.com/ma-compbio/Higashi/wiki) for extensive documentation and example tutorials.

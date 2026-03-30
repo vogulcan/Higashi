@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=82", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "higashi"
+version = "0.1.0a0"
+description = "Higashi: Multiscale and integrative scHi-C analysis"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = { text = "MIT" }
+authors = [
+  { name = "Ruochi Zhang", email = "ruochiz@andrew.cmu.edu" },
+]
+urls = { Homepage = "https://github.com/ma-compbio/Higashi", Repository = "https://github.com/ma-compbio/Higashi", Documentation = "https://github.com/ma-compbio/Higashi/wiki" }
+dependencies = [
+  "cooler==0.10.4",
+  "cython==3.2.4",
+  "h5py==3.16.0",
+  "matplotlib==3.10.8",
+  "numpy==2.4.3",
+  "pandas==2.3.3",
+  "pillow==12.1.1",
+  "scikit-learn==1.8.0",
+  "scipy==1.16.3",
+  "seaborn==0.13.2",
+  "torch==2.11.0",
+  "tqdm==4.67.3",
+  "umap-learn==0.5.11",
+]
+
+[project.optional-dependencies]
+gpu = ["cupy-cuda13x==14.0.1"]
+vis = [
+  "bokeh>=2.4,<3",
+  "cachetools>=5",
+  "cmocean>=4",
+]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["higashi*"]
+
+[tool.setuptools.package-data]
+higashi = [
+  "Higashi_vis/templates/*.css",
+  "Higashi_vis/templates/*.html",
+]

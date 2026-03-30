@@ -5,7 +5,7 @@ import multiprocessing
 from tqdm import tqdm, trange
 
 def insulation_score(m, windowsize=500000, res=10000):
-	windowsize_bin = int(windowsize / res)
+	windowsize_bin = max(1, int(windowsize / res))
 	score = np.ones((m.shape[0]))
 	for i in range(0, m.shape[0]):
 		with np.errstate(divide='ignore', invalid='ignore'):
@@ -20,7 +20,9 @@ def insulation_score(m, windowsize=500000, res=10000):
 
 
 def call_tads(score, windowsize=500000, res=10000):
-	windowsize_bin = int(windowsize / res / 2)
+	# scipy.signal.argrelextrema requires order >= 1. At coarse resolutions
+	# a default bp window can round to zero bins, so clamp to one bin.
+	windowsize_bin = max(1, int(windowsize / res / 2))
 	borders = argrelextrema(np.copy(score), np.less, order=windowsize_bin)
 	borders =  borders[0]
 	border_score = score[borders]
@@ -201,10 +203,10 @@ class scTAD_calibrator():
 			# print (assignment)
 			calibrated_sc_boundaries.append(np.unique(self.shared_boundaries[np.array(assignment).astype('int')]))
 		
-		calibrated_sc_boundaries = np.array(calibrated_sc_boundaries)
+		calibrated_sc_boundaries = np.array(calibrated_sc_boundaries, dtype='object')
 		self.shared_boundaries = np.unique(self.shared_boundaries)
 		boundaries2assignment = {k:v for (v,k) in enumerate(self.shared_boundaries)}
-		new_sc_assignment = np.array([[boundaries2assignment[b] for b in calib_b] for calib_b in calibrated_sc_boundaries])
+		new_sc_assignment = np.array([[boundaries2assignment[b] for b in calib_b] for calib_b in calibrated_sc_boundaries], dtype='object')
 		
 		print (self.print_identifier, "finished")
 		return self.shared_boundaries, new_sc_assignment, calibrated_sc_boundaries

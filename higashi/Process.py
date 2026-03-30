@@ -1,5 +1,8 @@
 import argparse
+import os
 import shutil
+import sys
+from contextlib import contextmanager
 
 try:
 	from Higashi_backend.Modules import *
@@ -34,6 +37,11 @@ except:
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 device_ids = [0, 1]
+_cupy = None
+_cupy_gaussian_filter = None
+_cupy_import_attempted = False
+_cupy_warning_emitted = False
+_cupy_runtime_available = None
 
 
 def parse_args():
@@ -52,6 +60,127 @@ def get_free_gpu():
 		torch.cuda.set_device(chosen_id)
 	else:
 		return
+	
+
+def should_use_cupy_gaussian_filter(config=None):
+	if config is not None and "use_cupy_gaussian_filter" in config:
+		return bool(config["use_cupy_gaussian_filter"])
+	value = os.environ.get("HIGASHI_USE_CUPY_GAUSSIAN_FILTER", "")
+	return value.lower() in {"1", "true", "yes", "on"}
+
+
+def should_disable_mpl_for_cupy_gaussian_filter(config=None):
+	if config is not None and "disable_mpl_for_cupy_gaussian_filter" in config:
+		return bool(config["disable_mpl_for_cupy_gaussian_filter"])
+	value = os.environ.get("HIGASHI_DISABLE_MPL_FOR_CUPY_GAUSSIAN_FILTER", "")
+	if value:
+		return value.lower() in {"1", "true", "yes", "on"}
+	return should_use_cupy_gaussian_filter(config)
+
+
+def get_cupy_gaussian_filter():
+	global _cupy, _cupy_gaussian_filter, _cupy_import_attempted
+	if not _cupy_import_attempted:
+		_cupy_import_attempted = True
+		try:
+			import cupy as cupy_module
+			from cupyx.scipy.ndimage import gaussian_filter as cupy_gaussian_filter
+			_cupy = cupy_module
+			_cupy_gaussian_filter = cupy_gaussian_filter
+		except Exception:
+			_cupy = None
+			_cupy_gaussian_filter = None
+	return _cupy, _cupy_gaussian_filter
+
+
+def emit_cupy_fallback_warning(message, exc=None):
+	if os.environ.get("HIGASHI_VERBOSE_CUPY_GAUSSIAN_FILTER", "").lower() in {"1", "true", "yes", "on"} and exc is not None:
+		print(f"{message}: {type(exc).__name__}: {exc}")
+	else:
+		print(message)
+
+
+@contextmanager
+def silence_stderr_fd():
+	try:
+		stderr_fd = sys.stderr.fileno()
+	except Exception:
+		yield
+		return
+
+	saved_stderr_fd = None
+	devnull_fd = None
+	try:
+		saved_stderr_fd = os.dup(stderr_fd)
+		devnull_fd = os.open(os.devnull, os.O_WRONLY)
+		os.dup2(devnull_fd, stderr_fd)
+		yield
+	finally:
+		if saved_stderr_fd is not None:
+			os.dup2(saved_stderr_fd, stderr_fd)
+			os.close(saved_stderr_fd)
+		if devnull_fd is not None:
+			os.close(devnull_fd)
+
+
+def check_cupy_gaussian_filter_runtime():
+	global _cupy_runtime_available, _cupy_warning_emitted
+	if _cupy_runtime_available is not None:
+		return _cupy_runtime_available
+
+	cupy_module, cupy_filter = get_cupy_gaussian_filter()
+	if cupy_module is None or cupy_filter is None:
+		_cupy_runtime_available = False
+		return False
+
+	try:
+		with silence_stderr_fd():
+			cupy_array = cupy_module.asarray(np.zeros((2, 2), dtype=np.float32))
+			filtered = cupy_filter(cupy_array, 1, order=0, truncate=1)
+			cupy_module.asnumpy(filtered)
+		_cupy_runtime_available = True
+	except Exception as exc:
+		_cupy_runtime_available = False
+		if not _cupy_warning_emitted:
+			emit_cupy_fallback_warning("cupyx gaussian_filter runtime check failed, falling back to scipy", exc)
+			_cupy_warning_emitted = True
+	return _cupy_runtime_available
+
+
+def apply_gaussian_filter_optional(array, sigma, order=0, truncate=1, mode=None, config=None):
+	global _cupy_runtime_available, _cupy_warning_emitted
+	kwargs = {
+		"order": order,
+		"truncate": truncate,
+	}
+	if mode is not None:
+		kwargs["mode"] = mode
+	if should_use_cupy_gaussian_filter(config):
+		cupy_module, cupy_filter = get_cupy_gaussian_filter()
+		if cupy_module is not None and cupy_filter is not None and check_cupy_gaussian_filter_runtime():
+			try:
+				cupy_array = cupy_module.asarray(array, dtype=cupy_module.float32)
+				filtered = cupy_filter(cupy_array, sigma, **kwargs)
+				return cupy_module.asnumpy(filtered)
+			except Exception as exc:
+				_cupy_runtime_available = False
+				if not _cupy_warning_emitted:
+					emit_cupy_fallback_warning("cupyx gaussian_filter unavailable at runtime, falling back to scipy", exc)
+					_cupy_warning_emitted = True
+		elif not _cupy_warning_emitted:
+			print("cupyx gaussian_filter requested but not available, falling back to scipy")
+			_cupy_warning_emitted = True
+	return gaussian_filter(array, sigma, **kwargs)
+	
+
+def get_process_cpu_num(config):
+	try:
+		configured_cpu_num = int(config.get("cpu_num", 0))
+	except (AttributeError, TypeError, ValueError):
+		configured_cpu_num = 0
+	if configured_cpu_num > 0:
+		return configured_cpu_num
+	return int(cpu_num)
 	
 
 def create_dir(config):
@@ -192,6 +321,7 @@ def extract_table(config):
 		keep_inter = config['keep_inter']
 	else:
 		keep_inter = False
+	worker_cpu_num = get_process_cpu_num(config)
 		
 	# fetch info from config
 	data_dir = config['data_dir']
@@ -216,7 +346,7 @@ def extract_table(config):
 				cell_tab = []
 				
 				p_list = []
-				pool = ProcessPoolExecutor(max_workers=cpu_num)
+				pool = ProcessPoolExecutor(max_workers=worker_cpu_num)
 				print ("First calculating how many lines are there")
 				line_count = sum(1 for i in open(os.path.join(data_dir, "data.txt"), 'rb'))
 				print("There are %d lines" % line_count)
@@ -282,7 +412,7 @@ def extract_table(config):
 		bar = trange(len(filelist))
 		
 		p_list = []
-		pool = ProcessPoolExecutor(max_workers=cpu_num)
+		pool = ProcessPoolExecutor(max_workers=worker_cpu_num)
 		
 		
 		for cell_id, file in enumerate(filelist):
@@ -360,12 +490,43 @@ def create_matrix_one_chrom(config, c, size, cell_size, temp, temp_weight, chrom
 		else:
 			bar = cell_num
 			cell_id = cell_num
+		
+		if len(temp) > 0:
+			order = np.argsort(temp[:, 0], kind='mergesort')
+			temp = temp[order]
+			temp_weight = temp_weight[order]
+			sorted_cell_id = temp[:, 0].astype('int', copy=False)
+			unique_cell_id, starts = np.unique(sorted_cell_id, return_index=True)
+			ends = np.empty_like(starts)
+			if len(starts) > 1:
+				ends[:-1] = starts[1:]
+			if len(starts) > 0:
+				ends[-1] = len(sorted_cell_id)
+			cell_ranges = {
+				int(cell): (int(start), int(end))
+				for cell, start, end in zip(unique_cell_id, starts, ends)
+			}
+		else:
+			cell_ranges = {}
+		
+		chrom_offset = chrom_start_end[c, 0]
+		size_metric = int(math.ceil(size * res / 1000000))
+		b = int(size_metric * size_metric / 2)
+		if res_cell != 1000000:
+			scale_factor2 = int(1000000 / res)
+		else:
+			scale_factor2 = None
 			
 		for i in bar:
-			mask = temp[:, 0] == i
-			temp2 = (temp[mask, 2:] - chrom_start_end[c, 0])
-			temp2_scale = np.floor(temp2 / scale_factor).astype('int')
-			temp_weight2 = temp_weight[mask]
+			start_end = cell_ranges.get(int(i))
+			if start_end is None:
+				temp2 = np.empty((0, 2), dtype=temp.dtype)
+				temp_weight2 = np.empty((0,), dtype=temp_weight.dtype)
+			else:
+				start, end = start_end
+				temp2 = temp[start:end, 2:] - chrom_offset
+				temp_weight2 = temp_weight[start:end]
+			temp2_scale = (temp2 // scale_factor).astype('int')
 			
 			read_count.append(np.sum(temp_weight2))
 			m1 = csr_matrix((temp_weight2, (temp2[:, 0], temp2[:, 1])), shape=(size, size), dtype='float32')
@@ -387,7 +548,9 @@ def create_matrix_one_chrom(config, c, size, cell_size, temp, temp_weight, chrom
 			# no more laplacian processing
 			m = csr_matrix((temp_weight2, (temp2_scale[:, 0], temp2_scale[:, 1])), shape=(cell_size, cell_size), dtype='float32')
 			m = m + m.T
-			m = csr_matrix(gaussian_filter((m).astype(np.float32).toarray(), 1, order=0, truncate=1))
+			dense_m = (m).astype(np.float32).toarray()
+			dense_m = apply_gaussian_filter_optional(dense_m, 1, order=0, truncate=1, config=config)
+			m = csr_matrix(dense_m)
 			m = m / (m.sum() + 1e-15)
 			# diag = m.diagonal(0)
 			# m1 = m.sum() - diag.sum()
@@ -398,14 +561,11 @@ def create_matrix_one_chrom(config, c, size, cell_size, temp, temp_weight, chrom
 			
 			cell_adj.append(m)
 			
-			if res_cell != 1000000:
-				scale_factor2 = int(1000000 / res)
-				size_metric = int(math.ceil(size * res / 1000000))
-				temp2_scale = np.floor(temp2 / scale_factor2).astype('int')
+			if scale_factor2 is not None:
+				temp2_scale_metric = (temp2 // scale_factor2).astype('int')
 			else:
-				size_metric = int(math.ceil(size * res / 1000000))
-			a.append(len(np.unique(temp2_scale, axis=0)))
-			b = int(size_metric * size_metric / 2)
+				temp2_scale_metric = temp2_scale
+			a.append(len(np.unique(temp2_scale_metric, axis=0)))
 			
 		cell_adj = np.array(cell_adj)
 		
@@ -488,6 +648,10 @@ def create_matrix(config, disable_mpl=False):
 		keep_inter = config['keep_inter']
 	else:
 		keep_inter = False
+	if not disable_mpl and should_disable_mpl_for_cupy_gaussian_filter(config):
+		print("cupy gaussian_filter enabled; running create_matrix in the main process")
+		disable_mpl = True
+	worker_cpu_num = get_process_cpu_num(config)
 	
 	print("generating contact maps for baseline")
 	data = np.load(os.path.join(temp_dir, "data.npy"))
@@ -506,7 +670,7 @@ def create_matrix(config, disable_mpl=False):
 	
 	data_within_chrom_list = []
 	weight_within_chrom_list = []
-	pool = ProcessPoolExecutor(max_workers=cpu_num)
+	pool = None if disable_mpl else ProcessPoolExecutor(max_workers=worker_cpu_num)
 	p_list = []
 	
 	cell_feats = [[] for i in range(len(chrom_list))]
@@ -653,8 +817,9 @@ def create_matrix(config, disable_mpl=False):
 			size = np.sum(np.sum(bin_adj > 0, axis=-1) > 0.1 * len(bin_adj))
 			qc_list[c] = np.asarray(qc_list[c])
 			qc_list[c] = ((qc_list[c] >= max(0.25 * size - 5, 0))).astype('bool')
-			
-		pool.shutdown(wait=True)
+
+		if pool is not None:
+			pool.shutdown(wait=True)
 
 		chrom2celladj = {}
 
@@ -763,7 +928,6 @@ def create_matrix(config, disable_mpl=False):
 		# for p in as_completed(p_list):
 		# 	temp1, c = p.result()
 
-
 		for c in range(len(chrom_list)):
 			temp = chrom2celladj[c]
 			length = int(np.sqrt(temp[0].shape[-1]) / 1000000 * res_cell)
@@ -773,7 +937,6 @@ def create_matrix(config, disable_mpl=False):
 			create_or_overwrite(save_file_cell, "%d" % c, data=temp1)
 
 		bar.close()
-		pool.shutdown(wait=True)
 
 		total_sparsity = total_reads / total_possible
 		# print("sparsity", total_sparsity.shape, total_sparsity, np.median(total_sparsity))
@@ -783,7 +946,6 @@ def create_matrix(config, disable_mpl=False):
 		sparse_chrom_list = np.array(sparse_chrom_list)
 		np.save(os.path.join(temp_dir, "sparse_nondiag_adj_nbr_1.npy"), sparse_chrom_list)
 		cell_feats = np.stack(cell_feats, axis=-1)
-		pool.shutdown(wait=True)
 
 		create_or_overwrite(save_file, "extra_cell_feats", data=cell_feats)
 

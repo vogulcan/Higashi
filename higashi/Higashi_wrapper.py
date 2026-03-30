@@ -17,7 +17,13 @@ except:
 import argparse
 import resource
 from scipy.sparse import csr_matrix
-from scipy.sparse.csr import get_csr_submatrix
+try:
+	from scipy.sparse._csr import get_csr_submatrix
+except ImportError:
+	try:
+		from scipy.sparse.csr import get_csr_submatrix
+	except ImportError:
+		from scipy.sparse._sparsetools import get_csr_submatrix
 from sklearn.preprocessing import StandardScaler
 import pickle
 import subprocess
@@ -134,8 +140,7 @@ def generate_negative_cpu(x, x_chrom, neg_num, max_bin, forward=True):
 						start = max(start, other_bin - max_bin)
 						end = min(end, other_bin + max_bin)
 						
-						temp[change] = np.random.randint(
-							int(start), int(end), 1) + 1
+						temp[change] = int(rg.integers(int(start), int(end))) + 1
 					else:
 						temp[change] = rg.choice(end - start) + start + 1
 				

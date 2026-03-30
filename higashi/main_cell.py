@@ -9,7 +9,13 @@ from Impute import impute_process
 import argparse
 import resource
 from scipy.sparse import csr_matrix
-from scipy.sparse.csr import get_csr_submatrix
+try:
+	from scipy.sparse._csr import get_csr_submatrix
+except ImportError:
+	try:
+		from scipy.sparse.csr import get_csr_submatrix
+	except ImportError:
+		from scipy.sparse._sparsetools import get_csr_submatrix
 from sklearn.preprocessing import StandardScaler
 import pickle
 import subprocess
@@ -22,6 +28,12 @@ def parse_args():
 	parser = argparse.ArgumentParser(description="Higashi main program")
 	parser.add_argument('-c', '--config', type=str, default="../config_dir/config_ramani.JSON")
 	parser.add_argument('-s', '--start', type=int, default=1)
+	parser.add_argument(
+		'--batch_size',
+		type=int,
+		default=None,
+		help="Positive-edge batch size before negative sampling. Negatives are added on top of this batch.",
+	)
 	
 	return parser.parse_args()
 
@@ -400,8 +412,7 @@ def generate_negative_cpu(x, x_chrom, forward=True):
 						start = max(start, other_bin - max_bin)
 						end = min(end, other_bin + max_bin)
 						
-						temp[change] = np.random.randint(
-							int(start), int(end), 1) + 1
+						temp[change] = int(rg.integers(int(start), int(end))) + 1
 					else:
 						temp[change] = rg.choice(end - start) + start + 1
 					
@@ -599,7 +610,7 @@ def one_thread_generate_neg(edges_part, edges_chrom, edge_weight, collect_num=1,
 
 		# Force to append an empty list and remove it, such that np.array won't broadcasting shapes
 		to_neighs.append([])
-		to_neighs = np.array(to_neighs)[:-1]
+		to_neighs = np.array(to_neighs, dtype='object')[:-1]
 		to_neighs = np.array(to_neighs, dtype='object').reshape((len(x), 2))
 		
 		size = int(len(x) / collect_num)
@@ -794,8 +805,8 @@ def save_embeddings(model):
 	with torch.no_grad():
 		ids = torch.arange(1, num_list[-1] + 1).long().to(device, non_blocking=True).view(-1)
 		embeddings = []
-		for j in range(math.ceil(len(ids) / batch_size)):
-			x = ids[j * batch_size:min((j + 1) * batch_size, len(ids))]
+		for j in range(math.ceil(len(ids) / embedding_batch_size)):
+			x = ids[j * embedding_batch_size:min((j + 1) * embedding_batch_size, len(ids))]
 			
 			embed = node_embedding_init(x)
 			embed = embed.detach().cpu().numpy()
@@ -1127,7 +1138,13 @@ if __name__ == '__main__':
 		cell_feats = np.array(input_f['extra_cell_feats'])
 		cell_feats1 = np.array(input_f['cell2weight'])
 	
-	batch_size = int(256 * max((1000000 / res), 1) * max(num[0] / 6000, 1))
+		default_batch_size = int(256 * max((1000000 / res), 1) * max(num[0] / 6000, 1))
+		if args.batch_size is None:
+			batch_size = default_batch_size
+		else:
+			if args.batch_size <= 0:
+				raise ValueError("batch_size must be positive")
+			batch_size = args.batch_size
 	
 	num_list = np.cumsum(num)
 	max_bin = int(np.max(num[1:]))
@@ -1176,7 +1193,7 @@ if __name__ == '__main__':
 		contractive_flag = False
 		contractive_loss_weight = 0.0
 	
-	# Dependes on the sparsity, change the number of negative samples
+	# Depends on the sparsity, change the number of negative samples.
 	if sparsity > 0.3:
 		neg_num = 1
 	elif sparsity > 0.2:
@@ -1187,8 +1204,13 @@ if __name__ == '__main__':
 		neg_num = 4
 	else:
 		neg_num = 5
-		
-	batch_size *= (1 + neg_num)
+	
+	negative_batch_size = batch_size * neg_num
+	total_batch_size = batch_size + negative_batch_size
+	embedding_batch_size = total_batch_size
+	print("positive batch_size", batch_size)
+	print("negative samples per positive", neg_num)
+	print("effective batch sizes", {"pos": batch_size, "neg": negative_batch_size, "total": total_batch_size})
 	
 	
 	print("Node type num", num, num_list)
@@ -1290,7 +1312,6 @@ if __name__ == '__main__':
 		threshold=1e-3,
 		min_lr=1e-6,
 		threshold_mode="abs",
-		verbose=True,
 	)
 	
 	model_parameters = filter(lambda p: p.requires_grad, higashi_model.parameters())
@@ -1307,13 +1328,25 @@ if __name__ == '__main__':
 	cell_neighbor_list = [[i] for i in range(num[0] + 1)]
 	cell_neighbor_weight_list = [[1] for i in range(num[0] + 1)]
 	
-
-	training_data_generator = DataGenerator(train_data, train_chrom, train_weight,
-											int(batch_size / (neg_num + 1) * collect_num),
-											True, num_list, k=collect_num)
-	validation_data_generator = DataGenerator(test_data, test_chrom, test_weight,
-											  int(batch_size / (neg_num + 1)),
-											  False, num_list, k=1)
+	# DataGenerator samples positive edges only. Negatives are appended in one_thread_generate_neg().
+	training_data_generator = DataGenerator(
+		train_data,
+		train_chrom,
+		train_weight,
+		int(batch_size * collect_num),
+		True,
+		num_list,
+		k=collect_num,
+	)
+	validation_data_generator = DataGenerator(
+		test_data,
+		test_chrom,
+		test_weight,
+		int(batch_size),
+		False,
+		num_list,
+		k=1,
+	)
 	
 	steps = 1
 	# First round, no cell dependent GNN
@@ -1343,7 +1376,6 @@ if __name__ == '__main__':
 			threshold=1e-3,
 			min_lr=1e-6,
 			threshold_mode="abs",
-			verbose=True,
 		)
 
 		print ("First stage training")
@@ -1419,7 +1451,6 @@ if __name__ == '__main__':
 		threshold=1e-3,
 		min_lr=1e-6,
 		threshold_mode="abs",
-		verbose=True,
 	)
 
 	if impute_no_nbr_flag or impute_with_nbr_flag:
@@ -1544,7 +1575,6 @@ if __name__ == '__main__':
 			threshold=1e-3,
 			min_lr=1e-6,
 			threshold_mode="abs",
-			verbose=True,
 		)
 
 
@@ -1602,4 +1632,3 @@ if __name__ == '__main__':
 
 				# When the 1nb imputation is there and nbr_mode=1 (itself is not included during learning), add the predicted values with only 1nb to the neighbor version.
 				linkhdf5("%s_nbr_%d_impute" % (embedding_name, neighbor_num-1), cell_id_all, temp_dir, impute_list, extra_str)
-

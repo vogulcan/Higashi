@@ -38,6 +38,8 @@ def fetch_batch_id(config, str1):
 	return batch_id_info
 
 def transform_weight_class(weight, mean, neg_num):
+	if isinstance(weight, list):
+		return [transform_weight_class(np.asarray(w), mean, neg_num) for w in weight]
 	weight = np.log2(weight + 1)
 	weight[weight >= np.quantile(weight, 0.99)] = np.quantile(weight, 0.99)
 	weight = weight / mean * neg_num
