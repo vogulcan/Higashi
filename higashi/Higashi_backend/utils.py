@@ -248,6 +248,9 @@ def linkhdf5_one_chrom(chrom, name, cell_id_splits, temp_dir, impute_list, name2
 
 def linkhdf5(name, cell_id_splits, temp_dir, impute_list, name2=None):
 	print("start linking hdf5 files")
+	if len(impute_list) == 0:
+		print("impute_list is empty; skipping hdf5 linking for %s" % name)
+		return
 	pool = ProcessPoolExecutor(max_workers=3)
 	for chrom in tqdm(impute_list):
 		# linkhdf5_one_chrom( chrom, name, np.copy(cell_id_splits), temp_dir, impute_list, name2)

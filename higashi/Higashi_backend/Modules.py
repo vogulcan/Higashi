@@ -1370,6 +1370,22 @@ class MeanAggregator_with_weights(nn.Module):
 		
 		return to_feats
 
+	def forward_GCN_subset(self, row_nodes, col_nodes, adj, route_nn=None):
+		if not torch.is_tensor(row_nodes):
+			row_nodes = torch.from_numpy(np.asarray(row_nodes)).long().to(device, non_blocking=True)
+		if not torch.is_tensor(col_nodes):
+			col_nodes = torch.from_numpy(np.asarray(col_nodes)).long().to(device, non_blocking=True)
+		indices, data, shape = adj
+		if shape[1] == 0 or len(col_nodes) == 0:
+			feat_dim = self.features(row_nodes[:1], route_nn=route_nn).shape[-1]
+			return torch.zeros((shape[0], feat_dim), dtype=torch.float, device=device)
+		embed_matrix = self.features(col_nodes, route_nn=route_nn)
+		mask = torch.sparse_coo_tensor(indices.to(device), data.to(device),
+		                               torch.Size([shape[0], shape[1]]), device=device)
+		to_feats = mask.mm(embed_matrix)
+		
+		return to_feats
+
 
 def moving_avg(adj, moving_range):
 	adj_origin = adj.copy()
@@ -1467,6 +1483,43 @@ class GraphSageEncoder_with_weights(nn.Module):
 					combined = list1[0]
 				
 				self.bin_feats[nodes_flatten] = combined.detach().clone()
+
+	def fix_cell_subset(self, cell, row_bin_ids=None, col_bin_ids=None, sparse_matrix=None, local_transfer_range=0,
+	                    route_nn_list=None):
+		self.fix = True
+		self.eval()
+		with torch.no_grad():
+			for chrom, row_bin_id in enumerate(row_bin_ids):
+				if len(row_bin_id) == 0:
+					continue
+				nodes_flatten = torch.from_numpy(row_bin_id).long().to(device, non_blocking=True)
+				neigh_feats = self.aggregator.forward_GCN_subset(
+					nodes_flatten,
+					col_bin_ids[chrom],
+					sparse_matrix[chrom],
+					route_nn=route_nn_list[chrom],
+				)
+				tr = self.transfer_range
+				if tr > 0:
+					start = np.maximum(row_bin_id - tr, self.start_end_dict[row_bin_id, 0] + 1)
+					end = np.minimum(row_bin_id + tr, self.start_end_dict[row_bin_id, 1] + 1)
+					
+					to_neighs = np.array([list(range(s, e)) for s, e in zip(start, end)], dtype='object')
+					
+					neigh_feats_linear = self.linear_aggregator.forward(nodes_flatten,
+																		to_neighs,
+																		2 * tr + 1)
+				list1 = [neigh_feats, neigh_feats_linear] if tr > 0 else [neigh_feats]
+				if not self.gcn:
+					bin_feats_self = self.features(nodes_flatten)
+					list1.append(bin_feats_self)
+				
+				if len(list1) > 0:
+					combined = torch.cat(list1, dim=-1)
+				else:
+					combined = list1[0]
+				
+				self.bin_feats[nodes_flatten] = combined.detach().clone()
 	
 	
 	def forward_off_hook(self, nodes, to_neighs, *args, route_nn=None):
@@ -1551,5 +1604,4 @@ class GraphSageEncoder_with_weights(nn.Module):
 			combined = torch.cat([cell_feats[:, None, :], combined], dim=1).view(sz_b, len_seq, -1)
 		
 		return combined, torch.cat([cell_feats[:, None, :], self_feats], dim=1).view(sz_b, len_seq, -1)
-
 

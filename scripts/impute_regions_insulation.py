@@ -8,19 +8,30 @@ import os
 import pickle
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
 import h5py
 import numpy as np
+from scipy.sparse import csr_matrix
+from scipy.stats import norm
 import torch
 import torch.nn.functional as F
 from sklearn.preprocessing import normalize
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-HIGASHI_ROOT = REPO_ROOT / "Higashi"
+
+def resolve_higashi_root(script_path: Path) -> Path:
+    for parent in script_path.resolve().parents:
+        if (parent / "higashi" / "Higashi_wrapper.py").exists():
+            return parent
+    raise RuntimeError(f"could not resolve Higashi root from {script_path}")
+
+
+HIGASHI_ROOT = resolve_higashi_root(Path(__file__))
+REPO_ROOT = HIGASHI_ROOT.parent
 if str(HIGASHI_ROOT) not in sys.path:
     sys.path.insert(0, str(HIGASHI_ROOT))
 
@@ -28,7 +39,7 @@ from higashi.Higashi_wrapper import Higashi  # noqa: E402
 import higashi.Higashi_wrapper as higashi_wrapper_module  # noqa: E402
 import higashi.Higashi_backend.Modules as backend_modules  # noqa: E402
 from higashi.Higashi_backend.Modules import GraphSageEncoder_with_weights  # noqa: E402
-from higashi.Impute import moving_avg, skip_start_end  # noqa: E402
+from higashi.Impute import skip_start_end  # noqa: E402
 from higashi.Higashi_analysis.Higashi_analysis import sqrt_norm  # noqa: E402
 from higashi.Higashi_analysis.Higashi_TAD import insulation_score  # noqa: E402
 
@@ -73,7 +84,13 @@ class ResolvedModel:
 class ChromRuntimeSpec:
     chrom: str
     chrom_index: int
-    bin_ids: np.ndarray
+    chrom_offset: int
+    target_local_bin_ids: np.ndarray
+    target_global_bin_ids: np.ndarray
+
+
+def log(message: str) -> None:
+    print(f"[impute_regions_insulation] {message}", flush=True)
 
 
 def parse_args() -> argparse.Namespace:
@@ -233,13 +250,16 @@ def load_label_info(config_path: Path, config: dict, cell_count: int) -> dict:
 
     label_info_path = find_first_file(candidate_dirs, ("label_info.pickle", "*.label_info.pickle"))
     if label_info_path is not None:
+        log(f"loading cell metadata from {label_info_path}")
         with label_info_path.open("rb") as fh:
             label_info = pickle.load(fh)
     else:
         cell_map_path = find_first_file(candidate_dirs, ("cell_map.tsv", "*.cell_map.tsv"))
         if cell_map_path is not None:
+            log(f"loading cell metadata from {cell_map_path}")
             label_info = read_cell_map(cell_map_path)
         else:
+            log("no label_info or cell_map found; synthesizing generic cell labels")
             label_info = synthesize_label_info(cell_count)
 
     if "cell_label" not in label_info:
@@ -293,27 +313,52 @@ def resolve_model_artifacts(temp_dir: Path, mode: str) -> ResolvedModel:
     weighted_info = temp_dir / "weighted_info.npy"
     has_weighted_info = weighted_info.exists()
 
+    log(
+        "checking model artifacts in "
+        f"{model_dir}: stage2_model={stage2_model.exists()}, "
+        f"stage2_ckpt={stage2_ckpt.exists()}, "
+        f"stage3_model={stage3_model.exists()}, "
+        f"stage3_ckpt={stage3_ckpt.exists()}, "
+        f"weighted_info={has_weighted_info}"
+    )
+
     if mode == "auto":
         if stage3_model.exists() and has_weighted_info:
-            return ResolvedModel("neighbor", stage3_model, weighted_info, 3, True)
+            resolved = ResolvedModel("neighbor", stage3_model, weighted_info, 3, True)
+            log(f"auto-selected stage 3 full model: {resolved.model_path}")
+            return resolved
         if stage3_ckpt.exists() and has_weighted_info:
-            return ResolvedModel("neighbor", stage3_ckpt, weighted_info, 3, False)
+            resolved = ResolvedModel("neighbor", stage3_ckpt, weighted_info, 3, False)
+            log(f"auto-selected stage 3 raw checkpoint: {resolved.model_path}")
+            return resolved
         if stage2_model.exists():
-            return ResolvedModel("no-neighbor", stage2_model, None, 2, True)
+            resolved = ResolvedModel("no-neighbor", stage2_model, None, 2, True)
+            log(f"auto-selected stage 2 full model: {resolved.model_path}")
+            return resolved
         if stage2_ckpt.exists():
-            return ResolvedModel("no-neighbor", stage2_ckpt, None, 2, False)
+            resolved = ResolvedModel("no-neighbor", stage2_ckpt, None, 2, False)
+            log(f"auto-selected stage 2 raw checkpoint: {resolved.model_path}")
+            return resolved
     elif mode == "neighbor":
         if stage3_model.exists() and has_weighted_info:
-            return ResolvedModel("neighbor", stage3_model, weighted_info, 3, True)
+            resolved = ResolvedModel("neighbor", stage3_model, weighted_info, 3, True)
+            log(f"using requested stage 3 full model: {resolved.model_path}")
+            return resolved
         if stage3_ckpt.exists() and has_weighted_info:
-            return ResolvedModel("neighbor", stage3_ckpt, weighted_info, 3, False)
+            resolved = ResolvedModel("neighbor", stage3_ckpt, weighted_info, 3, False)
+            log(f"using requested stage 3 raw checkpoint: {resolved.model_path}")
+            return resolved
         missing = "weighted_info.npy" if not has_weighted_info else "stage3 model/checkpoint"
         raise RuntimeError(f"neighbor mode requested but {missing} is missing in {temp_dir}")
     elif mode == "no-neighbor":
         if stage2_model.exists():
-            return ResolvedModel("no-neighbor", stage2_model, None, 2, True)
+            resolved = ResolvedModel("no-neighbor", stage2_model, None, 2, True)
+            log(f"using requested stage 2 full model: {resolved.model_path}")
+            return resolved
         if stage2_ckpt.exists():
-            return ResolvedModel("no-neighbor", stage2_ckpt, None, 2, False)
+            resolved = ResolvedModel("no-neighbor", stage2_ckpt, None, 2, False)
+            log(f"using requested stage 2 raw checkpoint: {resolved.model_path}")
+            return resolved
         raise RuntimeError(f"no-neighbor mode requested but stage2 model/checkpoint is missing in {temp_dir}")
     else:
         raise RuntimeError(f"unsupported mode: {mode}")
@@ -334,6 +379,11 @@ def rebuild_stage2_runtime_model(
 ) -> torch.nn.Module:
     runtime_config_path, temp_data_dir = write_runtime_config(config, label_info)
     try:
+        log(
+            f"rebuilding stage {2 if 'stage2' in checkpoint_path.name else 3} runtime model from raw checkpoint "
+            f"{checkpoint_path}"
+        )
+        log(f"temporary runtime config: {runtime_config_path}")
         higashi = Higashi(str(runtime_config_path))
         higashi.prep_model()
         node_embedding = higashi.node_embedding_init
@@ -369,6 +419,7 @@ def load_runtime_model(
     torch_device: torch.device,
 ) -> torch.nn.Module:
     if resolved_model.is_full_model:
+        log(f"loading serialized model from {resolved_model.model_path}")
         model = torch.load(resolved_model.model_path, map_location=runtime_device)
     else:
         model = rebuild_stage2_runtime_model(
@@ -383,6 +434,10 @@ def load_runtime_model(
     model.eval()
     if not isinstance(model.encode1.dynamic_nn, GraphSageEncoder_with_weights):
         raise RuntimeError("resolved model is not an imputation-ready stage2/stage3 model")
+    log(
+        f"loaded stage {resolved_model.stage} model in {resolved_model.mode} mode on {torch_device}; "
+        f"full_model={resolved_model.is_full_model}"
+    )
     return model
 
 
@@ -587,6 +642,14 @@ def build_region_specs(
                     discard_rows=discard_rows,
                 )
             )
+            region = regions[-1]
+            log(
+                f"region {region.group_name} ({region.name}): "
+                f"{region.original_chrom}:{region.bed_start_bp}-{region.bed_end_bp} -> "
+                f"{region.chrom} target_bins=[{region.target_start_bin}, {region.target_end_bin}) "
+                f"context_bins=[{region.context_start_bin}, {region.context_end_bin}) "
+                f"status={region.status} pairs={len(region.coordinates)}"
+            )
 
     return regions
 
@@ -597,52 +660,92 @@ def prepare_cell_chrom_list(
     sparse_chrom_list,
     local_transfer_range: int,
     weighted_info,
-) -> tuple[list[np.ndarray], list[list[object]], list[int]]:
+) -> tuple[list[np.ndarray], list[np.ndarray], list[list[object]], list[int]]:
+    def build_selected_row_block(adj, target_rows: np.ndarray, moving_range: int):
+        adj = adj.tocsr()
+        if len(target_rows) == 0:
+            return csr_matrix((0, adj.shape[1]), dtype=np.float32)
+        if moving_range <= 0:
+            return adj[target_rows].copy()
+
+        row_block = adj[target_rows].copy() * norm.pdf(0)
+        for shift in range(1, moving_range * 2 + 1):
+            before_rows = np.maximum(target_rows - shift, 0)
+            after_rows = np.minimum(target_rows + shift, adj.shape[0] - 1)
+            weight = norm.pdf(shift / moving_range)
+            row_block = row_block + (adj[before_rows] + adj[after_rows]) * weight
+        return row_block
+
+    def compress_row_block(row_block, chrom_offset: int) -> tuple[list[object], np.ndarray]:
+        row_block = row_block.tocsr().astype("float32")
+        row_block.data = np.log1p(row_block.data)
+        row_block = normalize(row_block, norm="l1", axis=1).tocsr().astype("float32")
+        if row_block.nnz == 0:
+            indices = torch.empty((2, 0), dtype=torch.long)
+            values = torch.empty((0,), dtype=torch.float32)
+            return [indices, values, (row_block.shape[0], 0)], np.empty((0,), dtype=np.int64)
+
+        unique_cols, inverse = np.unique(row_block.indices, return_inverse=True)
+        rows = np.repeat(np.arange(row_block.shape[0], dtype=np.int64), np.diff(row_block.indptr))
+        cols = inverse.astype(np.int64, copy=False)
+        indices = torch.from_numpy(np.vstack([rows, cols]))
+        values = torch.from_numpy(row_block.data.astype(np.float32, copy=False))
+        col_bin_ids = unique_cols.astype(np.int64) + chrom_offset + 1
+        return [indices, values, (row_block.shape[0], len(unique_cols))], col_bin_ids
+
     route_nn_list = [spec.chrom_index + 1 for spec in chrom_runtime_specs]
-    bin_ids = [spec.bin_ids for spec in chrom_runtime_specs]
+    row_bin_ids = [spec.target_global_bin_ids for spec in chrom_runtime_specs]
+    col_bin_ids: list[np.ndarray] = []
     cell_chrom_list: list[list[object]] = []
     weighted_adj = weighted_info is not None
     if weighted_adj:
         cell_neighbor_list, weight_dict = weighted_info
 
     for spec in chrom_runtime_specs:
-        chrom_matrix = 0
+        if weighted_adj:
+            chrom_matrix = sparse_chrom_list[spec.chrom_index][cell - 1] * 0.0
+        else:
+            chrom_matrix = sparse_chrom_list[spec.chrom_index][cell - 1]
         if weighted_adj:
             for neighbor_cell in cell_neighbor_list[cell]:
                 balance_weight = weight_dict[(neighbor_cell, cell)]
                 chrom_matrix = chrom_matrix + balance_weight * sparse_chrom_list[spec.chrom_index][neighbor_cell - 1]
-        else:
-            chrom_matrix = sparse_chrom_list[spec.chrom_index][cell - 1]
 
-        adj = moving_avg(chrom_matrix, local_transfer_range)
-        adj.data = np.log1p(adj.data)
-        adj = normalize(adj, norm="l1", axis=1).astype("float32")
-        acoo = adj.tocoo()
-        indices = torch.from_numpy(np.asarray([acoo.row, acoo.col]))
-        values = torch.from_numpy(acoo.data)
-        cell_chrom_list.append([indices, values, adj.shape])
+        row_block = build_selected_row_block(chrom_matrix, spec.target_local_bin_ids, local_transfer_range)
+        sparse_input, chrom_col_bin_ids = compress_row_block(row_block, spec.chrom_offset)
+        cell_chrom_list.append(sparse_input)
+        col_bin_ids.append(chrom_col_bin_ids)
 
-    return bin_ids, cell_chrom_list, route_nn_list
+    return row_bin_ids, col_bin_ids, cell_chrom_list, route_nn_list
 
 
 def build_chrom_runtime_specs(
     used_regions: list[RegionSpec],
-    num_list: np.ndarray,
-    chrom_bin_counts: dict[str, int],
 ) -> list[ChromRuntimeSpec]:
-    seen: set[str] = set()
+    chrom_to_bins: dict[str, list[np.ndarray]] = {}
+    chrom_to_index: dict[str, int] = {}
+    chrom_to_offset: dict[str, int] = {}
+    chrom_order: list[str] = []
     specs: list[ChromRuntimeSpec] = []
     for region in sorted(used_regions, key=lambda item: item.chrom_index):
-        if region.chrom in seen:
-            continue
-        seen.add(region.chrom)
-        start = int(num_list[region.chrom_index])
-        end = start + chrom_bin_counts[region.chrom]
+        if region.chrom not in chrom_to_bins:
+            chrom_to_bins[region.chrom] = []
+            chrom_order.append(region.chrom)
+            chrom_to_index[region.chrom] = region.chrom_index
+            chrom_to_offset[region.chrom] = region.chrom_offset
+        chrom_to_bins[region.chrom].append(np.unique(region.samples[:, 1:].reshape(-1)))
+
+    for chrom in chrom_order:
+        target_global_bin_ids = np.unique(np.concatenate(chrom_to_bins[chrom])).astype(np.int64)
+        chrom_offset = chrom_to_offset[chrom]
+        target_local_bin_ids = target_global_bin_ids - chrom_offset - 1
         specs.append(
             ChromRuntimeSpec(
-                chrom=region.chrom,
-                chrom_index=region.chrom_index,
-                bin_ids=np.arange(start, end, dtype=np.int64) + 1,
+                chrom=chrom,
+                chrom_index=chrom_to_index[chrom],
+                chrom_offset=chrom_offset,
+                target_local_bin_ids=target_local_bin_ids.astype(np.int64),
+                target_global_bin_ids=target_global_bin_ids,
             )
         )
     return specs
@@ -663,6 +766,7 @@ def initialize_output(
     regions: list[RegionSpec],
 ) -> tuple[h5py.File, dict[str, h5py.Group]]:
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    log(f"creating output HDF5 at {output_path}")
     output_file = h5py.File(output_path, "w")
     output_file.attrs["config_path"] = str(config_path.resolve())
     output_file.attrs["resolved_model_path"] = str(resolved_model.model_path.resolve())
@@ -740,6 +844,13 @@ def compute_insulation_for_region(
     return score[region.target_start_idx : region.target_end_idx].astype(np.float32)
 
 
+def summarize_region_status(regions: list[RegionSpec]) -> str:
+    status_counts: dict[str, int] = {}
+    for region in regions:
+        status_counts[region.status] = status_counts.get(region.status, 0) + 1
+    return ", ".join(f"{status}={count}" for status, count in sorted(status_counts.items()))
+
+
 def main() -> int:
     args = parse_args()
     if args.predict_batch_size == 0:
@@ -749,15 +860,32 @@ def main() -> int:
     config_path = Path(args.config).resolve()
     bed_path = Path(args.bed).resolve()
     output_path = Path(args.output).resolve()
+    log(
+        f"starting with config={config_path}, bed={bed_path}, output={output_path}, "
+        f"mode={args.mode}, window_ins={args.window_ins}, device={args.device}, "
+        f"predict_batch_size={args.predict_batch_size}"
+    )
     config = resolve_config_paths(config_path, load_config(config_path))
     temp_dir = Path(config["temp_dir"]).resolve()
     chrom_list = list(config["chrom_list"])
     res = int(config["resolution"])
     runtime_device, torch_device = resolve_runtime_device(args.device)
+    log(f"resolved Higashi root: {HIGASHI_ROOT}")
+    log(f"resolved runtime device: {runtime_device}")
+    log(f"resolved temp_dir: {temp_dir}")
+    log(f"chromosomes in config ({len(chrom_list)}): {', '.join(chrom_list)}")
+    log(f"resolution: {res} bp")
 
     num, num_list, chrom_bin_counts = load_counts(temp_dir, chrom_list)
     cell_count = int(num[0])
+    log(f"loaded node counts from {temp_dir / 'node_feats.hdf5'}")
+    log(f"cell count: {cell_count}")
+    log(
+        "chromosome bin counts: "
+        + ", ".join(f"{chrom}={chrom_bin_counts[chrom]}" for chrom in chrom_list)
+    )
     label_info = load_label_info(config_path, config, cell_count)
+    log(f"loaded {len(label_info['cell_id'])} cell labels")
     resolved_model = resolve_model_artifacts(temp_dir, args.mode)
     model = load_runtime_model(
         config_path=config_path,
@@ -779,7 +907,17 @@ def main() -> int:
         window_ins=args.window_ins,
     )
     used_regions = [region for region in regions if region.status == "ok"]
-    chrom_runtime_specs = build_chrom_runtime_specs(used_regions, num_list, chrom_bin_counts)
+    log(f"region summary: {summarize_region_status(regions)}")
+    chrom_runtime_specs = build_chrom_runtime_specs(used_regions)
+    if chrom_runtime_specs:
+        log(
+            "chromosomes used for imputation: "
+            + ", ".join(spec.chrom for spec in chrom_runtime_specs)
+        )
+        log(
+            "target bins per chromosome: "
+            + ", ".join(f"{spec.chrom}={len(spec.target_global_bin_ids)}" for spec in chrom_runtime_specs)
+        )
     output_file, region_groups = initialize_output(
         output_path=output_path,
         args=args,
@@ -792,15 +930,22 @@ def main() -> int:
 
     if not used_regions:
         output_file.close()
-        print("no imputable regions found; wrote metadata-only output")
+        log("no imputable regions found; wrote metadata-only output")
         return 0
 
     local_transfer_range = int(config.get("local_transfer_range", 0))
+    log(
+        f"loading sparse chromosome graph from {temp_dir / 'sparse_nondiag_adj_nbr_1.npy'} "
+        f"(local_transfer_range={local_transfer_range})"
+    )
     sparse_chrom_list = np.load(temp_dir / "sparse_nondiag_adj_nbr_1.npy", allow_pickle=True)
     weighted_info = None
     if resolved_model.weighted_info_path is not None:
+        log(f"loading neighbor weights from {resolved_model.weighted_info_path}")
         weighted_np = np.load(resolved_model.weighted_info_path, allow_pickle=True)
         weighted_info = (weighted_np[0], weighted_np[1])
+    else:
+        log("running without neighbor weights")
 
     all_samples = np.concatenate([region.samples for region in used_regions], axis=0)
     all_sample_chrom = np.concatenate(
@@ -812,8 +957,11 @@ def main() -> int:
     for region in used_regions:
         region_slices[region.group_name] = (offset, offset + len(region.samples))
         offset += len(region.samples)
+    log(f"total region triplets to predict per cell: {len(all_samples)}")
+    log(f"usable regions: {len(used_regions)} of {len(regions)}")
 
     activation = get_activation(config["loss_mode"])
+    log(f"loss mode: {config['loss_mode']}")
     model.eval()
     model.only_model = True
     embedding_init = model.encode1.static_nn
@@ -823,21 +971,25 @@ def main() -> int:
 
     bulk_accum = {region.group_name: np.zeros(len(region.coordinates), dtype=np.float64) for region in used_regions}
     verbose_every = int(config.get("impute_verbose", 10))
+    log(f"per-cell progress logging interval: every {verbose_every} cells")
+    start_time = time.time()
 
     try:
         for cell_idx in range(cell_count):
+            cell_start_time = time.time()
             cell = cell_idx + 1
             cell_dataset_name = f"cell_{label_info['cell_id'][cell_idx]}"
-            bin_ids, cell_chrom_list, route_nn_list = prepare_cell_chrom_list(
+            row_bin_ids, col_bin_ids, cell_chrom_list, route_nn_list = prepare_cell_chrom_list(
                 cell=cell,
                 chrom_runtime_specs=chrom_runtime_specs,
                 sparse_chrom_list=sparse_chrom_list,
                 local_transfer_range=local_transfer_range,
                 weighted_info=weighted_info,
             )
-            model.encode1.dynamic_nn.fix_cell2(
+            model.encode1.dynamic_nn.fix_cell_subset(
                 cell,
-                bin_ids=bin_ids,
+                row_bin_ids=row_bin_ids,
+                col_bin_ids=col_bin_ids,
                 sparse_matrix=cell_chrom_list,
                 local_transfer_range=local_transfer_range,
                 route_nn_list=route_nn_list,
@@ -878,8 +1030,14 @@ def main() -> int:
                     compression_opts=6,
                 )
 
-            if verbose_every > 0 and (cell_idx % verbose_every == 0 or cell_idx == cell_count - 1):
-                print(f"processed cell {cell_idx + 1} of {cell_count}")
+            if verbose_every > 0 and (cell_idx < 3 or cell_idx % verbose_every == 0 or cell_idx == cell_count - 1):
+                elapsed = time.time() - cell_start_time
+                total_elapsed = time.time() - start_time
+                log(
+                    f"processed cell {cell_idx + 1}/{cell_count} "
+                    f"({cell_dataset_name}, triplets={len(all_samples)}, "
+                    f"cell_time={elapsed:.2f}s, total_elapsed={total_elapsed:.2f}s)"
+                )
 
         for region in used_regions:
             region_group = region_groups[region.group_name]
@@ -893,6 +1051,10 @@ def main() -> int:
             )
             bulk_insulation = compute_insulation_for_region(dense_bulk, region, args.window_ins, res)
             region_group["insulation"].create_dataset("bulk_mean", data=bulk_insulation)
+            log(
+                f"wrote bulk outputs for {region.group_name} ({region.name}); "
+                f"pairs={len(region.coordinates)}, target_bins={region.target_end_idx - region.target_start_idx}"
+            )
     finally:
         output_file.close()
         embedding_init.on_hook()
@@ -904,7 +1066,8 @@ def main() -> int:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-    print(f"wrote {output_path}")
+    log(f"finished in {time.time() - start_time:.2f}s")
+    log(f"wrote {output_path}")
     return 0
 
 

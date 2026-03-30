@@ -729,8 +729,18 @@ class Higashi():
 			self.cell_ids = (torch.arange(self.num[0])).long().to(device, non_blocking=True)
 			
 		
-		# automatically set batch size based on the resolution and number of cells
-		self.batch_size = min(int(256 * max((1000000 / self.res), 1) * max(self.num[0] / 6000, 1)), 1280)
+		# Allow config batch_size to override the computed default positive-edge batch size.
+		default_batch_size = min(int(256 * max((1000000 / self.res), 1) * max(self.num[0] / 6000, 1)), 1280)
+		config_batch_size = self.config.get("batch_size")
+		if config_batch_size is None:
+			self.batch_size = default_batch_size
+		else:
+			try:
+				self.batch_size = int(config_batch_size)
+			except (TypeError, ValueError):
+				raise ValueError("config batch_size must be an integer")
+			if self.batch_size <= 0:
+				raise ValueError("config batch_size must be positive")
 		print ("batch_size", self.batch_size)
 		num_list = np.cumsum(self.num)
 		self.num_list = num_list

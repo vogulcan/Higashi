@@ -126,6 +126,9 @@ def impute_process(config_path, model, name, mode, cell_start, cell_end, sparse_
 	config = get_config(config_path)
 	res = config['resolution']
 	impute_list = config['impute_list']
+	if len(impute_list) == 0:
+		print("impute_list is empty; skipping imputation for %s" % name)
+		return
 	chrom_list = config['chrom_list']
 	temp_dir = config['temp_dir']
 	raw_dir = os.path.join(temp_dir, "raw")

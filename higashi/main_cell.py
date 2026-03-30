@@ -32,7 +32,7 @@ def parse_args():
 		'--batch_size',
 		type=int,
 		default=None,
-		help="Positive-edge batch size before negative sampling. Negatives are added on top of this batch.",
+		help="Positive-edge batch size before negative sampling. Overrides config batch_size when provided.",
 	)
 	
 	return parser.parse_args()
@@ -1139,12 +1139,20 @@ if __name__ == '__main__':
 		cell_feats1 = np.array(input_f['cell2weight'])
 	
 		default_batch_size = int(256 * max((1000000 / res), 1) * max(num[0] / 6000, 1))
-		if args.batch_size is None:
-			batch_size = default_batch_size
-		else:
+		config_batch_size = config.get("batch_size")
+		if args.batch_size is not None:
 			if args.batch_size <= 0:
 				raise ValueError("batch_size must be positive")
 			batch_size = args.batch_size
+		elif config_batch_size is not None:
+			try:
+				batch_size = int(config_batch_size)
+			except (TypeError, ValueError):
+				raise ValueError("config batch_size must be an integer")
+			if batch_size <= 0:
+				raise ValueError("config batch_size must be positive")
+		else:
+			batch_size = default_batch_size
 	
 	num_list = np.cumsum(num)
 	max_bin = int(np.max(num[1:]))
