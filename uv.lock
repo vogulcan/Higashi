@@ -178,20 +178,6 @@ nvtx = [
 ]
 
 [[package]]
-name = "cupy-cuda13x"
-version = "14.0.1"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "cuda-pathfinder" },
-    { name = "numpy" },
-]
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/7d/9b/7983b4e24749937dd4ab34565561a8c015e88df4ff9fd4678337b710b3ee/cupy_cuda13x-14.0.1-cp312-cp312-manylinux2014_aarch64.whl", hash = "sha256:763f33f5641a28db5ac91788301271930e910813f1b1279119b504babeb1b863", size = 73616635, upload-time = "2026-02-20T10:24:14.115Z" },
-    { url = "https://files.pythonhosted.org/packages/5c/d4/42f79f6baea881c604982df18d158456e40071925bfdd53c1b6eb82f6e75/cupy_cuda13x-14.0.1-cp312-cp312-manylinux2014_x86_64.whl", hash = "sha256:a06cdc0d6a0054663fca4770e32df6a39cbeb7396a08b23f97965e5e1c0edb7d", size = 69793920, upload-time = "2026-02-20T10:24:20.287Z" },
-    { url = "https://files.pythonhosted.org/packages/ac/0c/83c6be011fa00a270c0d08985844fd992d59c34a6bb91755dad4f31942e8/cupy_cuda13x-14.0.1-cp312-cp312-win_amd64.whl", hash = "sha256:e91052340bab0860bdf1fd4e5a4fc85846800df6cc9a1de02a5afa1dd8655550", size = 35353554, upload-time = "2026-02-20T10:24:24.337Z" },
-]
-
-[[package]]
 name = "cycler"
 version = "0.12.1"
 source = { registry = "https://pypi.org/simple" }
@@ -337,9 +323,6 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
-gpu = [
-    { name = "cupy-cuda13x" },
-]
 vis = [
     { name = "bokeh" },
     { name = "cachetools" },
@@ -352,7 +335,6 @@ requires-dist = [
     { name = "cachetools", marker = "extra == 'vis'", specifier = ">=5" },
     { name = "cmocean", marker = "extra == 'vis'", specifier = ">=4" },
     { name = "cooler", specifier = "==0.10.4" },
-    { name = "cupy-cuda13x", marker = "extra == 'gpu'", specifier = "==14.0.1" },
     { name = "cython", specifier = "==3.2.4" },
     { name = "h5py", specifier = "==3.16.0" },
     { name = "matplotlib", specifier = "==3.10.8" },
@@ -366,7 +348,7 @@ requires-dist = [
     { name = "tqdm", specifier = "==4.67.3" },
     { name = "umap-learn", specifier = "==0.5.11" },
 ]
-provides-extras = ["gpu", "vis"]
+provides-extras = ["vis"]
 
 [[package]]
 name = "jinja2"

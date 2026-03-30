@@ -2,7 +2,6 @@ import argparse
 import os
 import shutil
 import sys
-from contextlib import contextmanager
 
 try:
 	from Higashi_backend.Modules import *
@@ -37,11 +36,6 @@ except:
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 device_ids = [0, 1]
-_cupy = None
-_cupy_gaussian_filter = None
-_cupy_import_attempted = False
-_cupy_warning_emitted = False
-_cupy_runtime_available = None
 
 
 def parse_args():
@@ -60,117 +54,6 @@ def get_free_gpu():
 		torch.cuda.set_device(chosen_id)
 	else:
 		return
-	
-
-def should_use_cupy_gaussian_filter(config=None):
-	if config is not None and "use_cupy_gaussian_filter" in config:
-		return bool(config["use_cupy_gaussian_filter"])
-	value = os.environ.get("HIGASHI_USE_CUPY_GAUSSIAN_FILTER", "")
-	return value.lower() in {"1", "true", "yes", "on"}
-
-
-def should_disable_mpl_for_cupy_gaussian_filter(config=None):
-	if config is not None and "disable_mpl_for_cupy_gaussian_filter" in config:
-		return bool(config["disable_mpl_for_cupy_gaussian_filter"])
-	value = os.environ.get("HIGASHI_DISABLE_MPL_FOR_CUPY_GAUSSIAN_FILTER", "")
-	if value:
-		return value.lower() in {"1", "true", "yes", "on"}
-	return should_use_cupy_gaussian_filter(config)
-
-
-def get_cupy_gaussian_filter():
-	global _cupy, _cupy_gaussian_filter, _cupy_import_attempted
-	if not _cupy_import_attempted:
-		_cupy_import_attempted = True
-		try:
-			import cupy as cupy_module
-			from cupyx.scipy.ndimage import gaussian_filter as cupy_gaussian_filter
-			_cupy = cupy_module
-			_cupy_gaussian_filter = cupy_gaussian_filter
-		except Exception:
-			_cupy = None
-			_cupy_gaussian_filter = None
-	return _cupy, _cupy_gaussian_filter
-
-
-def emit_cupy_fallback_warning(message, exc=None):
-	if os.environ.get("HIGASHI_VERBOSE_CUPY_GAUSSIAN_FILTER", "").lower() in {"1", "true", "yes", "on"} and exc is not None:
-		print(f"{message}: {type(exc).__name__}: {exc}")
-	else:
-		print(message)
-
-
-@contextmanager
-def silence_stderr_fd():
-	try:
-		stderr_fd = sys.stderr.fileno()
-	except Exception:
-		yield
-		return
-
-	saved_stderr_fd = None
-	devnull_fd = None
-	try:
-		saved_stderr_fd = os.dup(stderr_fd)
-		devnull_fd = os.open(os.devnull, os.O_WRONLY)
-		os.dup2(devnull_fd, stderr_fd)
-		yield
-	finally:
-		if saved_stderr_fd is not None:
-			os.dup2(saved_stderr_fd, stderr_fd)
-			os.close(saved_stderr_fd)
-		if devnull_fd is not None:
-			os.close(devnull_fd)
-
-
-def check_cupy_gaussian_filter_runtime():
-	global _cupy_runtime_available, _cupy_warning_emitted
-	if _cupy_runtime_available is not None:
-		return _cupy_runtime_available
-
-	cupy_module, cupy_filter = get_cupy_gaussian_filter()
-	if cupy_module is None or cupy_filter is None:
-		_cupy_runtime_available = False
-		return False
-
-	try:
-		with silence_stderr_fd():
-			cupy_array = cupy_module.asarray(np.zeros((2, 2), dtype=np.float32))
-			filtered = cupy_filter(cupy_array, 1, order=0, truncate=1)
-			cupy_module.asnumpy(filtered)
-		_cupy_runtime_available = True
-	except Exception as exc:
-		_cupy_runtime_available = False
-		if not _cupy_warning_emitted:
-			emit_cupy_fallback_warning("cupyx gaussian_filter runtime check failed, falling back to scipy", exc)
-			_cupy_warning_emitted = True
-	return _cupy_runtime_available
-
-
-def apply_gaussian_filter_optional(array, sigma, order=0, truncate=1, mode=None, config=None):
-	global _cupy_runtime_available, _cupy_warning_emitted
-	kwargs = {
-		"order": order,
-		"truncate": truncate,
-	}
-	if mode is not None:
-		kwargs["mode"] = mode
-	if should_use_cupy_gaussian_filter(config):
-		cupy_module, cupy_filter = get_cupy_gaussian_filter()
-		if cupy_module is not None and cupy_filter is not None and check_cupy_gaussian_filter_runtime():
-			try:
-				cupy_array = cupy_module.asarray(array, dtype=cupy_module.float32)
-				filtered = cupy_filter(cupy_array, sigma, **kwargs)
-				return cupy_module.asnumpy(filtered)
-			except Exception as exc:
-				_cupy_runtime_available = False
-				if not _cupy_warning_emitted:
-					emit_cupy_fallback_warning("cupyx gaussian_filter unavailable at runtime, falling back to scipy", exc)
-					_cupy_warning_emitted = True
-		elif not _cupy_warning_emitted:
-			print("cupyx gaussian_filter requested but not available, falling back to scipy")
-			_cupy_warning_emitted = True
-	return gaussian_filter(array, sigma, **kwargs)
 	
 
 def get_process_cpu_num(config):
@@ -549,7 +432,7 @@ def create_matrix_one_chrom(config, c, size, cell_size, temp, temp_weight, chrom
 			m = csr_matrix((temp_weight2, (temp2_scale[:, 0], temp2_scale[:, 1])), shape=(cell_size, cell_size), dtype='float32')
 			m = m + m.T
 			dense_m = (m).astype(np.float32).toarray()
-			dense_m = apply_gaussian_filter_optional(dense_m, 1, order=0, truncate=1, config=config)
+			dense_m = gaussian_filter(dense_m, 1, order=0, truncate=1)
 			m = csr_matrix(dense_m)
 			m = m / (m.sum() + 1e-15)
 			# diag = m.diagonal(0)
@@ -648,9 +531,6 @@ def create_matrix(config, disable_mpl=False):
 		keep_inter = config['keep_inter']
 	else:
 		keep_inter = False
-	if not disable_mpl and should_disable_mpl_for_cupy_gaussian_filter(config):
-		print("cupy gaussian_filter enabled; running create_matrix in the main process")
-		disable_mpl = True
 	worker_cpu_num = get_process_cpu_num(config)
 	
 	print("generating contact maps for baseline")

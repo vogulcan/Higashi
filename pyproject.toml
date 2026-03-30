@@ -30,7 +30,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-gpu = ["cupy-cuda13x==14.0.1"]
 vis = [
   "bokeh>=2.4,<3",
   "cachetools>=5",
